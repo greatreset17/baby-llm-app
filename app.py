@@ -141,9 +141,11 @@ def generate_stream(model, tokenizer, prompt, max_new_tokens, temperature=0.8, t
     # 入力テンソル化 (Batch=1)
     idx = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     
-    # 差分デコードのための状態保持 (UTF-8の部分マルチバイト境界化を防ぐ)
-    accumulated_ids = []
-    current_text = ""
+    # 1. 履歴全体を追跡するためのトークン配列
+    all_token_ids = list(prompt_ids)
+    
+    # 2. 最初のプロンプトテキストをベースラインとしてデコード
+    current_text = tokenizer.decode(prompt_ids)
     
     for _ in range(max_new_tokens):
         # 視野 (block_size) を超えないように入力をクロップ
@@ -168,17 +170,24 @@ def generate_stream(model, tokenizer, prompt, max_new_tokens, temperature=0.8, t
         idx_next = torch.multinomial(probs, num_samples=1)
         token_id = idx_next.item()
         
-        # 文脈と累積の更新
-        accumulated_ids.append(token_id)
+        # トークン履歴と入力コンテキストの更新
+        all_token_ids.append(token_id)
         idx = torch.cat((idx, idx_next), dim=1)
         
-        # 差分デコードの実行
-        full_decoded_text = tokenizer.decode(accumulated_ids)
-        new_chars = full_decoded_text[len(current_text):]
+        # 3. 履歴全体を一挙にデコード（BPEサブワード・日本語UTF-8の境界ズレを完全解消）
+        full_decoded_text = tokenizer.decode(all_token_ids)
+        
+        # 4. 文字化け置換文字「」（Unicode: \ufffd）を完全に排除したクリーンな状態で安全に差分を抽出
+        clean_full = full_decoded_text.replace("", "").replace("\ufffd", "")
+        clean_current = current_text.replace("", "").replace("\ufffd", "")
+        new_chars = clean_full[len(clean_current):]
+        
+        # 5. 直前のデコード状態を完全な履歴テキストとして保存（未完成のバイト列も次回に引き継がれます）
         current_text = full_decoded_text
         
-        # リアルタイムにストリーミング出力
-        yield new_chars
+        # 6. 新たに確定したクリーンな日本語文字のみを yield する
+        if new_chars:
+            yield new_chars
 
 # ==========================================
 # 4. サイドバーの実装（コントロール ＆ テンプレート）
