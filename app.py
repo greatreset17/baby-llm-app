@@ -84,11 +84,15 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# セッションステートに現在のモードを保持
+if "app_mode" not in st.session_state:
+    st.session_state.app_mode = "📝 文学執筆モード"
+
 # ==========================================
 # 2. モデルとトークナイザーのロード（キャッシュ）
 # ==========================================
 @st.cache_resource
-def load_model_and_tokenizer():
+def load_model_and_tokenizer(mode):
     # デバイス自動検出
     if torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -97,11 +101,13 @@ def load_model_and_tokenizer():
     else:
         device = torch.device("cpu")
         
-    model_path = "baby_gpt_best.pth"
+    if mode == "📝 文学執筆モード":
+        model_path = "baby_gpt_best.pth"
+    else:
+        model_path = "baby_gpt_chat.pth"
+
     if not os.path.exists(model_path):
-        model_path = "baby_gpt.pth"
-        if not os.path.exists(model_path):
-            return None, None, device
+        return None, None, device
             
     # チェックポイント読み込み
     checkpoint = torch.load(model_path, map_location=device)
@@ -128,13 +134,13 @@ def load_model_and_tokenizer():
     
     return model, tokenizer, device
 
-model, tokenizer, device = load_model_and_tokenizer()
+model, tokenizer, device = load_model_and_tokenizer(st.session_state.app_mode)
 
 # ==========================================
 # 3. Token Streamingジェネレータ (差分デコード搭載)
 # ==========================================
 @torch.no_grad()
-def generate_stream(model, tokenizer, prompt, max_new_tokens, temperature=0.8, top_k=40, device="cpu"):
+def generate_stream(model, tokenizer, prompt, max_new_tokens, temperature=0.8, top_k=40, device="cpu", is_chat_mode=False):
     encode = lambda s: tokenizer.encode(s, add_special_tokens=False).ids
     prompt_ids = encode(prompt)
     
@@ -187,6 +193,13 @@ def generate_stream(model, tokenizer, prompt, max_new_tokens, temperature=0.8, t
         
         # 6. 新たに確定したクリーンな日本語文字のみを yield する
         if new_chars:
+            if is_chat_mode:
+                if "\n" in new_chars:
+                    yield new_chars.split("\n")[0]
+                    break
+                if "問：" in new_chars:
+                    yield new_chars.split("問：")[0]
+                    break
             yield new_chars
 
 # ==========================================
@@ -196,15 +209,33 @@ with st.sidebar:
     st.markdown('<div style="text-align: center; margin-bottom: 10px;"><h2 style="color: #FF8E53; font-weight:800; font-size: 1.5rem; margin:0;">✍️ 赤ちゃん文豪AI</h2></div>', unsafe_allow_html=True)
     st.markdown('<div style="color: #888; text-align:center; font-size:0.85rem; margin-bottom:20px;">あなたのMacが育てた、世界に一つの脳細胞</div>', unsafe_allow_html=True)
     
-    # A. モデルスペック情報
-    st.markdown('<h3 style="font-size:1.0rem; font-weight:600; margin-bottom:10px; color:#ddd;">🧠 モデル構成スペック</h3>', unsafe_allow_html=True)
+    # A. モード切り替え
+    st.markdown('<h3 style="font-size:1.0rem; font-weight:600; margin-bottom:10px; color:#ddd;">🔄 動作モード</h3>', unsafe_allow_html=True)
+    selected_mode = st.radio(
+        "AIの動作モードを選択してください",
+        ("📝 文学執筆モード", "💬 チャットモード"),
+        index=0 if st.session_state.app_mode == "📝 文学執筆モード" else 1,
+        label_visibility="collapsed"
+    )
+    if selected_mode != st.session_state.app_mode:
+        st.session_state.app_mode = selected_mode
+        st.session_state.messages = []  # モード切り替え時にチャット履歴をクリア
+        st.rerun()
+
+    # B. モデルスペック情報
+    st.markdown('<h3 style="font-size:1.0rem; font-weight:600; margin-bottom:10px; margin-top:20px; color:#ddd;">🧠 モデルスペック</h3>', unsafe_allow_html=True)
     
     if model is not None:
+        total_params = sum(p.numel() for p in model.parameters())
         st.markdown(f"""
         <div class="spec-card">
             <div class="spec-item">
+                <span class="spec-label">稼働モデル</span>
+                <span class="spec-value" style="font-size:0.8rem;">{ 'baby_gpt_best.pth' if st.session_state.app_mode == "📝 文学執筆モード" else 'baby_gpt_chat.pth'}</span>
+            </div>
+            <div class="spec-item">
                 <span class="spec-label">総パラメータ数</span>
-                <span class="spec-value">24.45 M (24,454,816)</span>
+                <span class="spec-value">{total_params / 1_000_000:.2f} M</span>
             </div>
             <div class="spec-item">
                 <span class="spec-label">コンテキスト視野</span>
@@ -212,15 +243,7 @@ with st.sidebar:
             </div>
             <div class="spec-item">
                 <span class="spec-label">Transformer層数</span>
-                <span class="spec-value">12 層</span>
-            </div>
-            <div class="spec-item">
-                <span class="spec-label">アテンションヘッド</span>
-                <span class="spec-value">6 ヘッド</span>
-            </div>
-            <div class="spec-item">
-                <span class="spec-label">BPE語彙数 (Vocab)</span>
-                <span class="spec-value">{tokenizer.get_vocab_size()} 語</span>
+                <span class="spec-value">{len(model.blocks)} 層</span>
             </div>
             <div class="spec-item">
                 <span class="spec-label">稼働デバイス</span>
@@ -229,9 +252,9 @@ with st.sidebar:
         </div>
         """, unsafe_allow_html=True)
     else:
-        st.error("モデルまたはトークナイザーがロードできません。'baby_gpt_best.pth' または 'baby_gpt.pth'、および 'tokenizer.json' がカレントディレクトリに存在することを確認してください。")
+        st.error("モデルがロードできません。ファイルが存在するか確認してください。")
 
-    # B. 推論パラメータ制御
+    # C. 推論パラメータ制御
     st.markdown('<h3 style="font-size:1.0rem; font-weight:600; margin-top:20px; margin-bottom:10px; color:#ddd;">⚙️ 生成オプション</h3>', unsafe_allow_html=True)
     
     temperature = st.slider(
@@ -254,24 +277,33 @@ with st.sidebar:
     
     max_new_tokens = st.slider(
         "最大生成文字数 (Max Tokens)",
-        min_value=50,
+        min_value=10,
         max_value=400,
-        value=200,
+        value=64 if st.session_state.app_mode == "💬 チャットモード" else 200,
         step=10,
         help="一回のプロンプト入力でAIが追加生成する長さの上限です。"
     )
     
-    # C. ワンクリックテンプレート
-    st.markdown('<h3 style="font-size:1.0rem; font-weight:600; margin-top:25px; margin-bottom:10px; color:#ddd;">📜 文豪テンプレート</h3>', unsafe_allow_html=True)
-    st.markdown('<div style="color: #888; font-size:0.8rem; margin-bottom:10px;">クリックするとAIが即座にその続きをストリーミング生成します：</div>', unsafe_allow_html=True)
+    # D. ワンクリックテンプレート
+    st.markdown('<h3 style="font-size:1.0rem; font-weight:600; margin-top:25px; margin-bottom:10px; color:#ddd;">📜 テンプレート</h3>', unsafe_allow_html=True)
+    st.markdown('<div style="color: #888; font-size:0.8rem; margin-bottom:10px;">クリックするとAIが即座に生成します：</div>', unsafe_allow_html=True)
     
-    presets = {
-        "🐱 漱石風（吾輩は猫である）": "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。何でも薄暗いじめじめした所で",
-        "🏃 太宰風（走れメロス）": "メロスは激怒した。必ず、かの邪智暴虐の王を除かなければならぬと決意した。メロスには政治がわからぬ。メロスは、",
-        "🌌 賢治風（銀河鉄道の夜）": "ジョバンニは、学校の授業が終わると、街を通って大きな活版所に上がっていきました。入るとすぐにインクの匂いが",
-        "🦊 南吉風（ごん狐）": "むかしむかし、あるところに、おじいさんとおばあさんが住んでいました。おじいさんは山へ芝刈りに、おばあさんは川へ",
-        "🕵️ 乱歩風（明智小五郎）": "「おい、明智君、いったいこの事件をどう思うかね？」波越警部は焦ったように、枕元でじっと考え込んでいる探偵の"
-    }
+    if st.session_state.app_mode == "📝 文学執筆モード":
+        presets = {
+            "🐱 漱石風（吾輩は猫である）": "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。何でも薄暗いじめじめした所で",
+            "🏃 太宰風（走れメロス）": "メロスは激怒した。必ず、かの邪智暴虐の王を除かなければならぬと決意した。メロスには政治がわからぬ。メロスは、",
+            "🌌 賢治風（銀河鉄道の夜）": "ジョバンニは、学校の授業が終わると、街を通って大きな活版所に上がっていきました。入るとすぐにインクの匂いが",
+            "🦊 南吉風（ごん狐）": "むかしむかし、あるところに、おじいさんとおばあさんが住んでいました。おじいさんは山へ芝刈りに、おばあさんは川へ",
+            "🕵️ 乱歩風（明智小五郎）": "「おい、明智君、いったいこの事件をどう思うかね？」波越警部は焦ったように、枕元でじっと考え込んでいる探偵の"
+        }
+    else:
+        presets = {
+            "👋 挨拶（こんにちは）": "こんにちは！",
+            "🌌 質問（ジョバンニは？）": "ジョバンニはどこへ行った？",
+            "🏃 質問（メロスは何に激怒した？）": "メロスは何に対して激怒したの？",
+            "🦊 質問（ごん狐が届けたものは？）": "ごん狐が兵十に届けたものは何？",
+            "🌙 挨拶（こんばんは）": "こんばんは"
+        }
     
     # テンプレートボタンの処理
     for label, text in presets.items():
@@ -279,7 +311,7 @@ with st.sidebar:
             st.session_state.temp_prompt = text
             st.session_state.trigger_preset = True
 
-    # D. チャット履歴の消去
+    # E. チャット履歴の消去
     st.markdown("<hr style='margin: 25px 0 15px 0; opacity: 0.15;'/>", unsafe_allow_html=True)
     if st.button("💬 会話をリセット", use_container_width=True, type="secondary"):
         st.session_state.messages = []
@@ -288,8 +320,12 @@ with st.sidebar:
 # ==========================================
 # 5. メインチャットインターフェース
 # ==========================================
-st.markdown('<h1 class="main-title">✍️ 赤ちゃん文豪 AI</h1>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">BPEサブワードと24.4Mパラメータで蘇る、ブラウザ上の近代日本文学クロスオーバー</div>', unsafe_allow_html=True)
+if st.session_state.app_mode == "📝 文学執筆モード":
+    st.markdown('<h1 class="main-title">✍️ 赤ちゃん文豪AI</h1>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitle">BPEサブワードと独自モデルで蘇る、ブラウザ上の近代日本文学クロスオーバー</div>', unsafe_allow_html=True)
+else:
+    st.markdown('<h1 class="main-title">💬 文豪チャットAI</h1>', unsafe_allow_html=True)
+    st.markdown('<div class="subtitle">ファインチューニングされた文豪AIと一問一答の対話を楽しむ</div>', unsafe_allow_html=True)
 
 # セッション状態の初期化
 if "messages" not in st.session_state:
@@ -297,12 +333,15 @@ if "messages" not in st.session_state:
 
 # 初回起動時のウェルカムメッセージ
 if not st.session_state.messages:
-    welcome_text = """はじめまして！私はあなたに育てていただいた **「赤ちゃん文豪AI」** です。
-    
-夏目漱石や太宰治、江戸川乱歩などの名作（計12.5MB）から日本語を学んだ、2,445万パラメータのトランスフォーマー脳細胞（最高知性ベストモデル）を持っています。
-    
-お好きな書き出し（プロンプト）を入力していただくか、サイドバーの **「文豪テンプレート」** をクリックしてみてください。私の中に眠る文豪たちのエッセンスが交差し、続きの文章を紡ぎ出します！"""
-    
+    if st.session_state.app_mode == "📝 文学執筆モード":
+        welcome_text = """はじめまして！私はあなたに育てていただいた **「赤ちゃん文豪AI」** です。
+        
+お好きな書き出し（プロンプト）を入力していただくか、サイドバーの **「テンプレート」** をクリックしてみてください。私の中に眠る文豪たちのエッセンスが交差し、続きの文章を紡ぎ出します！"""
+    else:
+        welcome_text = """こんにちは！こちらは **「チャットモード」** です。
+        
+一問一答形式にファインチューニングされたモデルを使用しています。「こんにちは」などの挨拶や、「ジョバンニはどこへ行った？」などの質問を投げかけてみてください！"""
+        
     st.session_state.messages.append({
         "role": "assistant",
         "content": welcome_text
@@ -322,7 +361,8 @@ if "trigger_preset" in st.session_state and st.session_state.trigger_preset:
 
 # チャット入力フォーム
 if not preset_triggered:
-    user_prompt = st.chat_input("赤ちゃん文豪に続きを書かせたいプロンプトを入力してください...")
+    input_placeholder = "続きを書かせたいプロンプトを入力してください..." if st.session_state.app_mode == "📝 文学執筆モード" else "文豪AIに話しかけてください..."
+    user_prompt = st.chat_input(input_placeholder)
 
 # プロンプトが送信されたときの処理
 if user_prompt:
@@ -336,19 +376,33 @@ if user_prompt:
         if model is None:
             st.error("モデルが正常にロードされていません。カレントディレクトリにモデルファイルが配置されているかご確認ください。")
         else:
-            # リアルタイムにストリーミング生成して表示
-            # ※ st.write_stream はジェネレータが yield した文字を即座にUIに反映させます
-            full_response = st.write_stream(
-                generate_stream(
-                    model=model,
-                    tokenizer=tokenizer,
-                    prompt=user_prompt,
-                    max_new_tokens=max_new_tokens,
-                    temperature=temperature,
-                    top_k=top_k,
-                    device=device
+            is_chat = st.session_state.app_mode == "💬 チャットモード"
+            
+            # 内部プロンプトの構築
+            if is_chat:
+                internal_prompt = f"問：{user_prompt} 答："
+            else:
+                internal_prompt = user_prompt
+                
+            # 文字数オーバーチェック
+            encoded_internal = tokenizer.encode(internal_prompt, add_special_tokens=False).ids
+            if len(encoded_internal) >= model.block_size:
+                st.error(f"入力が長すぎます！ {model.block_size} トークン以内に収めてください。")
+                full_response = "(エラー：入力長超過)"
+            else:
+                # リアルタイムにストリーミング生成して表示
+                full_response = st.write_stream(
+                    generate_stream(
+                        model=model,
+                        tokenizer=tokenizer,
+                        prompt=internal_prompt,
+                        max_new_tokens=min(max_new_tokens, model.block_size - len(encoded_internal)),
+                        temperature=temperature,
+                        top_k=top_k,
+                        device=device,
+                        is_chat_mode=is_chat
+                    )
                 )
-            )
             
             # 生成結果を会話履歴に保存
             st.session_state.messages.append({"role": "assistant", "content": full_response})
